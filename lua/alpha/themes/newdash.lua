@@ -66,10 +66,9 @@ local buttons = {
     type = "group",
     val = {
         button("SPC f f", "  Find File  ", ":Telescope find_files<CR>"),
+        button("SPC f p", "  Find File in Project  "),
         button("SPC f o", "  Recent File  ", ":Telescope oldfiles<CR>"),
         button("SPC f g", "  Find Word  "),
-        button("SPC b m", "  Bookmarks  ", ":Telescope marks<CR>"),
-        button("SPC t h", "  Themes  ", ":Telescope themes<CR>"),
     },
     opts = {
         spacing = 1,
