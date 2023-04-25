@@ -14,36 +14,53 @@ local cursor_jumps = {}
 local cursor_jumps_press = {}
 local cursor_jumps_press_queue = {}
 
+-- map of buffer -> state
+local alpha_state = {}
+local function head(t)
+    local next,_,_ = pairs(t)
+    return t[next(t)]
+end
+
 local function noop() end
 
-alpha.redraw = noop
-alpha.close = noop
-
 function alpha.press()
-    for queued_cursor_ix, _ in pairs(cursor_jumps_press_queue) do
-        cursor_jumps_press[queued_cursor_ix]()
-    end
     -- only press under the cursor if there's no queue
     if vim.tbl_count(cursor_jumps_press_queue) == 0 then
         cursor_jumps_press[cursor_ix]()
     end
+    for queued_cursor_ix, _ in pairs(cursor_jumps_press_queue) do
+        cursor_jumps_press[queued_cursor_ix]()
+    end
 end
 
-function alpha.queue_press()
+local function draw_press(row, col, state)
+    vim.api.nvim_buf_set_option(state.buffer, "modifiable", true)
+    vim.api.nvim_buf_set_text(state.buffer, row - 1, col, row - 1, col + 1, { "*" })
+    vim.api.nvim_buf_set_option(state.buffer, "modifiable", false)
+end
+
+local function draw_presses(state)
+    for _, loc in pairs(cursor_jumps_press_queue) do
+        local row = loc[1]
+        local col = loc[2]
+        draw_press(row, col, state)
+    end
+end
+
+function alpha.queue_press(state)
     if cursor_jumps_press_queue[cursor_ix] then
         cursor_jumps_press_queue[cursor_ix] = nil
     else
-        cursor_jumps_press_queue[cursor_ix] = true
 
-        -- temporary, find a way to do this in a pure, data-oriented way
-        local cursor = vim.api.nvim_win_get_cursor(0)
+        local cursor = vim.api.nvim_win_get_cursor(state.window)
         local row = cursor[1]
         local col = cursor[2]
-        vim.api.nvim_buf_set_option(0, "modifiable", true)
-        vim.api.nvim_buf_set_text(0, row - 1, col, row - 1, col + 1, { "*" })
-        vim.api.nvim_buf_set_option(0, "modifiable", false)
-        local height = vim.api.nvim_win_get_height(0)
-        vim.api.nvim_win_set_cursor(0, { math.min(row + 1, height + 2), col })
+
+        cursor_jumps_press_queue[cursor_ix] = {row,col}
+
+        draw_press(row,col,state)
+        local height = state.line
+        vim.api.nvim_win_set_cursor(0, { math.min(row + 1, height), col })
     end
 end
 
@@ -60,6 +77,20 @@ end
 
 local function spaces(n)
     return str_rep(" ", n)
+end
+
+---@param keymaps nil | string | string[]
+---@return string[]
+local function normalize_keymaps(keymaps)
+    if keymaps == nil then
+        return {}
+    end
+
+    if type(keymaps) ~= "table" then
+        keymaps = { keymaps }
+    end
+
+    return keymaps
 end
 
 function alpha.align_center(tbl, state)
@@ -92,7 +123,7 @@ function alpha.pad_margin(tbl, state, margin, shrink)
     local padding = spaces(left)
     local padded = {}
     for k, v in pairs(tbl) do
-        padded[k] = padding .. v .. padding
+        padded[k] = padding .. v
     end
     return padded, left
 end
@@ -106,7 +137,7 @@ end
 --     return trimmed
 -- end
 
-function alpha.highlight(state, end_ln, hl, left)
+function alpha.highlight(state, end_ln, hl, left, el)
     local hl_type = type(hl)
     local hl_tbl = {}
     if hl_type == "string" then
@@ -114,17 +145,35 @@ function alpha.highlight(state, end_ln, hl, left)
             table.insert(hl_tbl, { state.buffer, -1, hl, i, 0, -1 })
         end
     end
-    -- TODO: support multiple lines
     if hl_type == "table" then
-        for _, hl_section in pairs(hl) do
-            table.insert(hl_tbl, {
-                state.buffer,
-                -1,
-                hl_section[1],
-                state.line,
-                left + hl_section[2],
-                left + hl_section[3],
-            })
+        local function single_line(the_hl, line)
+            for _, hl_section in pairs(the_hl) do
+                local col_end
+                if hl_section[3] < 0 then
+                    if type(el.val) == "string" then
+                        col_end = left + #el.val + hl_section[3] + 1
+                    else
+                        col_end = -1
+                    end
+                else
+                    col_end = left + hl_section[3]
+                end
+                table.insert(hl_tbl, {
+                    state.buffer,
+                    -1,
+                    hl_section[1],
+                    state.line + line,
+                    left + hl_section[2],
+                    col_end,
+                })
+            end
+        end
+        if hl[1] and hl[1][1] and type(hl[1][1]) == "table" then
+            for ix, hl_line in ipairs(hl) do
+                single_line(hl_line, ix-1)
+            end
+        else
+            single_line(hl, 0)
         end
     end
     return hl_tbl
@@ -139,61 +188,50 @@ function alpha.resolve(to, el, opts, state)
 end
 
 function layout_element.text(el, conf, state)
-    if type(el.val) == "table" then
-        local end_ln = state.line + #el.val
-        local val = el.val
-        local hl = {}
-        local padding = { left = 0 }
-        if conf.opts and conf.opts.margin and el.opts and (el.opts.position ~= "center") then
-            local left
-            val, left = alpha.pad_margin(val, state, conf.opts.margin, if_nil(el.opts.shrink_margin, true))
-            padding.left = padding.left + left
-        end
-        if el.opts then
-            if el.opts.position == "center" then
-                val, _ = alpha.align_center(val, state)
-            end
-            -- if el.opts.wrap == "overflow" then
-            --     val = trim(val, state)
-            -- end
-        end
-        if el.opts and el.opts.hl then
-            hl = alpha.highlight(state, end_ln, el.opts.hl, padding.left)
-        end
-        state.line = end_ln
-        return val, hl
-    end
-
-    if type(el.val) == "string" then
-        local val = {}
-        local hl = {}
-        for s in el.val:gmatch("[^\r\n]+") do
-            val[#val + 1] = s
-        end
-        local padding = { left = 0 }
-        if conf.opts and conf.opts.margin and el.opts and (el.opts.position ~= "center") then
-            local left
-            val, left = alpha.pad_margin(val, state, conf.opts.margin, if_nil(el.opts.shrink_margin, true))
-            padding.left = padding.left + left
-        end
-        if el.opts then
-            if el.opts.position == "center" then
-                val, _ = alpha.align_center(val, state)
-            end
-        end
-        local end_ln = state.line + 1
-        if el.opts and el.opts.hl then
-            hl = alpha.highlight(state, end_ln, el.opts.hl, padding.left)
-        end
-        state.line = end_ln
-        return val, hl
-    end
-
     if type(el.val) == "function" then
         return alpha.resolve(layout_element.text, el, conf, state)
     end
+    local val
+    if type(el.val) == "string" then
+        val = {}
+        for s in el.val:gmatch("[^\r\n]+") do
+            val[#val + 1] = s
+        end
+    else
+        val = el.val
+    end
+    local hl = {}
+    local padding = { left = 0 }
+    local margin = vim.tbl_get(conf, 'opts', 'margin')
+    local position = vim.tbl_get(el, 'opts', 'position')
+    if margin and (position ~= "center") then
+        local left
+        val, left = alpha.pad_margin(val, state, margin, if_nil(vim.tbl_get(el, 'opts', 'shrink_margin'), true))
+        padding.left = padding.left + left
+    end
+    if position == "center" then
+        local left
+        val, left = alpha.align_center(val, state)
+        padding.left = padding.left + left
+    end
+    local el_hl = vim.tbl_get(el, 'opts', 'hl')
+    if type(el.val) == "string" then
+        if el_hl then
+            hl = alpha.highlight(state, state.line, el_hl, padding.left, el)
+        end
+        state.line = state.line + 1
+    else
+        local end_ln = state.line + #el.val
+        if el_hl then
+            hl = alpha.highlight(state, end_ln, el_hl, padding.left, el)
+        end
+        state.line = end_ln
+    end
+    return val, hl
+
 end
 
+---@diagnostic disable-next-line: unused-local
 function layout_element.padding(el, conf, state)
     local lines = 0
     if type(el.val) == "function" then
@@ -219,27 +257,31 @@ function layout_element.button(el, conf, state)
         center = 0,
         right = 0,
     }
-    if el.opts and el.opts.shortcut then
+    local opts = vim.tbl_get(el, 'opts')
+    local shortcut = vim.tbl_get(opts, 'shortcut')
+    local width = vim.tbl_get(opts, 'width')
+    if shortcut then
         -- this min lets the padding resize when the window gets smaller
-        if el.opts.width then
-            local max_width = math.min(el.opts.width, state.win_width)
-            if el.opts.align_shortcut == "right" then
-                padding.center = max_width - (strdisplaywidth(el.val) + strdisplaywidth(el.opts.shortcut))
+        if width then
+            local max_width = math.min(width, state.win_width)
+            local shortcut_padding = max_width - (strdisplaywidth(el.val) + strdisplaywidth(shortcut))
+            if opts.align_shortcut == "right" then
+                padding.center = shortcut_padding
             else
-                padding.right = max_width - (strdisplaywidth(el.val) + strdisplaywidth(el.opts.shortcut))
+                padding.right = shortcut_padding
             end
         end
-        if el.opts.align_shortcut == "right" then
-            val = { concat({ el.val, spaces(padding.center), el.opts.shortcut }) }
+        if opts.align_shortcut == "right" then
+            val = { concat({ el.val, spaces(padding.center), opts.shortcut }) }
         else
-            val = { concat({ el.opts.shortcut, el.val, spaces(padding.right) }) }
+            val = { concat({ opts.shortcut, el.val, spaces(padding.right) }) }
         end
     else
         val = { el.val }
     end
 
     -- margin
-    if conf.opts and conf.opts.margin and el.opts and (el.opts.position ~= "center") then
+    if vim.tbl_get(conf, 'opts', 'margin') and (vim.tbl_get(opts, 'position') ~= "center") then
         local left
         val, left = alpha.pad_margin(val, state, conf.opts.margin, if_nil(el.opts.shrink_margin, true))
         if el.opts.align_shortcut == "right" then
@@ -250,15 +292,13 @@ function layout_element.button(el, conf, state)
     end
 
     -- center
-    if el.opts then
-        if el.opts.position == "center" then
-            local left
-            val, left = alpha.align_center(val, state)
-            if el.opts.align_shortcut == "right" then
-                padding.center = padding.center + left
-            end
-            padding.left = padding.left + left
+    if vim.tbl_get(el, 'opts', 'position') == "center" then
+        local left
+        val, left = alpha.align_center(val, state)
+        if el.opts.align_shortcut == "right" then
+            padding.center = padding.center + left
         end
+        padding.left = padding.left + left
     end
 
     local row = state.line + 1
@@ -268,23 +308,23 @@ function layout_element.button(el, conf, state)
     cursor_jumps_press[#cursor_jumps_press + 1] = el.on_press
     if el.opts and el.opts.hl_shortcut then
         if type(el.opts.hl_shortcut) == "string" then
-            hl = { { el.opts.hl_shortcut, 0, strdisplaywidth(el.opts.shortcut) + 1 } }
+            hl = { { el.opts.hl_shortcut, 0, #el.opts.shortcut + 1 } }
         else
             hl = el.opts.hl_shortcut
         end
         if el.opts.align_shortcut == "right" then
-            hl = alpha.highlight(state, state.line, hl, #el.val + padding.center)
+            hl = alpha.highlight(state, state.line, hl, #el.val + math.max(0,padding.center), el)
         else
-            hl = alpha.highlight(state, state.line, hl, padding.left)
+            hl = alpha.highlight(state, state.line, hl, padding.left, el)
         end
     end
 
     if el.opts and el.opts.hl then
         local left = padding.left
         if el.opts.align_shortcut == "left" then
-            left = left + strdisplaywidth(el.opts.shortcut) + 2
+            left = left + #el.opts.shortcut
         end
-        list_extend(hl, alpha.highlight(state, state.line, el.opts.hl, left))
+        list_extend(hl, alpha.highlight(state, state.line, el.opts.hl, left, el))
     end
     state.line = state.line + 1
     return val, hl
@@ -298,7 +338,19 @@ function layout_element.group(el, conf, state)
     if type(el.val) == "table" then
         local text_tbl = {}
         local hl_tbl = {}
+        local priority = if_nil(vim.tbl_get(el, 'opts', 'priority'), 1)
+        local inherit = vim.tbl_get(el, 'opts', 'inherit')
         for _, v in pairs(el.val) do
+            if inherit then
+                if v.opts then
+                    local vpriority = if_nil(vim.tbl_get(v, 'opts', 'priority'), 0)
+                    if priority > vpriority then
+                        v.opts = vim.tbl_extend("force", v.opts, inherit)
+                    end
+                else
+                    v.opts = inherit
+                end
+            end
             local text, hl = layout_element[v.type](v, conf, state)
             if text then
                 list_extend(text_tbl, text)
@@ -329,7 +381,7 @@ local function layout(conf, state)
     end
     vim.api.nvim_buf_set_lines(state.buffer, 0, -1, false, text)
     for _, hl_line in pairs(hl) do
-        vim.api.nvim_buf_add_highlight(hl_line[1], hl_line[2], hl_line[3], hl_line[4], hl_line[5], hl_line[6])
+        vim.api.nvim_buf_add_highlight(hl_line[1], hl_line[2], hl_line[3], hl_line[4], math.max(hl_line[5], 0), hl_line[6])
     end
 end
 
@@ -338,6 +390,7 @@ local keymaps_element = {}
 keymaps_element.text = noop
 keymaps_element.padding = noop
 
+---@diagnostic disable-next-line: unused-local
 function keymaps_element.button(el, conf, state)
     if el.opts and el.opts.keymap then
         if type(el.opts.keymap[1]) == "table" then
@@ -398,8 +451,7 @@ local function closest_cursor_jump(cursor, cursors, prev_cursor)
             end
         end
     end
-    if
-        not min -- top or bottom
+    if not min -- top or bottom
     then
         if direction then
             return 1, cursors[1]
@@ -414,35 +466,87 @@ local function closest_cursor_jump(cursor, cursors, prev_cursor)
 end
 
 -- stylua: ignore start
-local function enable_alpha(conf)
-    -- vim.opt_local behaves inconsistently for window options, it seems.
-    -- I don't have the patience to sort out a better way to do this
-    -- or seperate out the buffer local options.
-    local noautocmd
-    if conf.opts.noautocmd then noautocmd = "noautocmd " else noautocmd = "" end
-    vim.cmd(noautocmd ..
-    [[  silent! setlocal bufhidden=wipe nobuflisted colorcolumn= foldlevel=999 foldcolumn=0 matchpairs= nocursorcolumn nocursorline nolist nonumber norelativenumber nospell noswapfile signcolumn=no synmaxcol& buftype=nofile filetype=alpha nowrap
+local function enable_alpha(conf, state)
+    local eventignore = vim.opt.eventignore
+    if conf.opts.noautocmd then
+        vim.opt.eventignore = 'all'
+    end
 
-        augroup alpha_temp
-        au!
-        autocmd BufUnload <buffer> lua require('alpha').close()
-        autocmd CursorMoved <buffer> lua require('alpha').move_cursor()
-        augroup END
-    ]])
+    vim.opt_local.bufhidden = 'wipe'
+    vim.opt_local.buflisted = false
+    vim.opt_local.matchpairs = ''
+    vim.opt_local.swapfile = false
+    vim.opt_local.buftype = 'nofile'
+    vim.opt_local.filetype = 'alpha'
+    vim.opt_local.synmaxcol = 0
+    vim.opt_local.wrap = false
+    vim.opt_local.colorcolumn = ''
+    vim.opt_local.foldlevel = 999
+    vim.opt_local.foldcolumn = '0'
+    vim.opt_local.cursorcolumn = false
+    vim.opt_local.cursorline = false
+    vim.opt_local.number = false
+    vim.opt_local.relativenumber = false
+    vim.opt_local.list = false
+    vim.opt_local.spell = false
+    vim.opt_local.signcolumn = 'no'
+
+    if conf.opts.noautocmd then
+        vim.opt.eventignore = eventignore
+    end
+
+    local group_id = vim.api.nvim_create_augroup('alpha_temp', { clear = true })
+
+    vim.api.nvim_create_autocmd('BufUnload', {
+        group = group_id,
+        buffer = state.buffer,
+        callback = alpha.close,
+    })
+
+    vim.api.nvim_create_autocmd('WinClosed', {
+        group = group_id,
+        buffer = state.buffer,
+        callback = alpha.handle_window,
+    })
+
+    vim.api.nvim_create_autocmd('CursorMoved', {
+        group = group_id,
+        buffer = state.buffer,
+        -- FIXME: many windows can be associated with
+        callback = function() alpha.move_cursor(state.window) end,
+    })
 
     if conf.opts then
         if if_nil(conf.opts.redraw_on_resize, true) then
-            vim.cmd([[
-                autocmd alpha_temp VimResized * lua require('alpha').redraw()
-                autocmd alpha_temp BufLeave,WinEnter,WinNew,WinClosed * lua require('alpha').redraw()
-            ]])
+            vim.api.nvim_create_autocmd('VimResized', {
+                group = group_id,
+                pattern = '*',
+                callback = function() alpha.redraw(conf, state) end,
+            })
+            vim.api.nvim_create_autocmd({ 'BufLeave', 'WinEnter', 'WinNew', 'WinClosed' }, {
+                group = group_id,
+                pattern = '*',
+                callback = function() alpha.redraw(conf, state) end,
+            })
+            vim.api.nvim_create_autocmd('CursorMoved', {
+                group = group_id,
+                pattern = '*',
+                callback = function()
+                    local width = vim.api.nvim_win_get_width(state.window)
+                    if width ~= state.width
+                    then alpha.redraw(conf, state)
+                    end
+                end,
+            })
         end
 
         if conf.opts.setup then
             conf.opts.setup()
         end
     end
+
 end
+
 -- stylua: ignore end
 
 -- stylua: ignore start
@@ -459,36 +563,84 @@ local function should_skip_alpha()
     for _, arg in pairs(vim.v.argv) do
         -- whitelisted arguments
         -- always open
-        if  arg == "--startuptime"
-            then return false
+        if arg == "--startuptime"
+        then return false
         end
 
         -- blacklisted arguments
         -- always skip
-        if  arg == "-b"
+        if arg == "-b"
             -- commands, typically used for scripting
             or arg == "-c" or vim.startswith(arg, "+")
             or arg == "-S"
-            then return true
+        then return true
         end
     end
 
     -- base case: don't skip
     return false
 end
+
 -- stylua: ignore end
 
-local current_config
+function alpha.draw(conf, state)
+    -- TODO: figure out why this can happen
+    if state.window == nil then return end
 
+    cursor_jumps = {}
+    cursor_jumps_press = {}
+    state.win_width = vim.api.nvim_win_get_width(state.window or 0)
+    state.line = 0
+    -- this is for redraws. i guess the cursor 'moves'
+    -- when the screen is cleared and then redrawn
+    -- so we save the index before that happens
+    local ix = cursor_ix
+    vim.api.nvim_buf_set_option(state.buffer, "modifiable", true)
+    vim.api.nvim_buf_clear_namespace(state.buffer, -1, 0, -1)
+    vim.api.nvim_buf_set_lines(state.buffer, 0, -1, false, {})
+    layout(conf, state)
+    vim.api.nvim_buf_set_option(state.buffer, "modifiable", false)
+    if vim.api.nvim_get_current_win() == state.window then
+        if #cursor_jumps ~= 0 then
+            vim.api.nvim_win_set_cursor(state.window, cursor_jumps[ix])
+        end
+    end
+    draw_presses(state)
+end
+
+function alpha.move_cursor(window)
+    window = window or 0
+    if #cursor_jumps ~= 0 then
+            local cursor = vim.api.nvim_win_get_cursor(window)
+            local closest_ix, closest_pt = closest_cursor_jump(cursor, cursor_jumps, cursor_jumps[cursor_ix])
+            cursor_ix = closest_ix
+            vim.api.nvim_win_set_cursor(window, closest_pt)
+    end
+end
+
+function alpha.redraw(conf, state)
+    if (conf == nil) and (state == nil) then
+        local buffer = vim.api.nvim_get_current_buf()
+        local alpha_prime = vim.tbl_get(alpha_state, buffer) or head(alpha_state)
+        if alpha_prime == nil then return end
+        conf = alpha.default_config
+        state = alpha_prime
+    end
+    alpha.draw(conf, state)
+end
+
+function alpha.close(ev)
+    alpha_state[ev.buf] = nil
+    cursor_ix = 1
+    cursor_jumps = {}
+    vim.api.nvim_del_augroup_by_id(ev.group)
+    vim.api.nvim_exec_autocmds("User", { pattern = "AlphaClosed" })
+end
+
+-- @param on_vimenter: ?bool optional
+-- @param fon: ?table optional
 function alpha.start(on_vimenter, conf)
     local window = vim.api.nvim_get_current_win()
-
-    alpha.move_cursor = function()
-        local cursor = vim.api.nvim_win_get_cursor(window)
-        local closest_ix, closest_pt = closest_cursor_jump(cursor, cursor_jumps, cursor_jumps[cursor_ix])
-        cursor_ix = closest_ix
-        vim.api.nvim_win_set_cursor(window, closest_pt)
-    end
 
     local buffer
     if on_vimenter then
@@ -501,8 +653,11 @@ function alpha.start(on_vimenter, conf)
             buffer = vim.api.nvim_create_buf(false, true)
             vim.api.nvim_win_set_buf(window, buffer)
         else
-            buffer = vim.api.nvim_get_current_buf()
-            vim.api.nvim_buf_delete(buffer, {})
+            ---@diagnostic disable-next-line: param-type-mismatch
+            if not pcall(vim.cmd, 'e #') then
+                buffer = vim.api.nvim_get_current_buf()
+                vim.api.nvim_buf_delete(buffer, {})
+            end
             return
         end
     end
@@ -512,85 +667,98 @@ function alpha.start(on_vimenter, conf)
         return
     end
 
-    conf = conf or current_config
-
-    enable_alpha(conf)
+    conf = conf or alpha.default_config
 
     local state = {
         line = 0,
         buffer = buffer,
         window = window,
         win_width = 0,
+        open = false,
     }
-    local function draw()
-        for k in pairs(cursor_jumps) do
-            cursor_jumps[k] = nil
-        end
-        for k in pairs(cursor_jumps_press) do
-            cursor_jumps_press[k] = nil
-        end
-        state.win_width = vim.api.nvim_win_get_width(state.window)
-        state.line = 0
-        -- this is for redraws. i guess the cursor 'moves'
-        -- when the screen is cleared and then redrawn
-        -- so we save the index before that happens
-        local ix = cursor_ix
-        vim.api.nvim_buf_set_option(state.buffer, "modifiable", true)
-        vim.api.nvim_buf_set_lines(state.buffer, 0, -1, false, {})
-        layout(conf, state)
-        vim.api.nvim_buf_set_option(state.buffer, "modifiable", false)
-        vim.api.nvim_buf_set_keymap(
-            state.buffer,
-            "n",
-            "<CR>",
-            "<cmd>lua require('alpha').press()<CR>",
-            { noremap = false, silent = true }
-        )
-        vim.api.nvim_buf_set_keymap(
-            state.buffer,
-            "n",
-            "<M-CR>",
-            "<cmd>lua require('alpha').queue_press()<CR>",
-            { noremap = false, silent = true }
-        )
-        vim.api.nvim_win_set_cursor(state.window, cursor_jumps[ix])
+
+    alpha_state[buffer] = state
+
+    for _, k in ipairs(normalize_keymaps(conf.opts.keymap.press)) do
+        vim.keymap.set("n", k, function() alpha.press() end, { noremap = false, silent = true, buffer = state.buffer })
     end
-    alpha.redraw = draw
-    alpha.close = function()
-        cursor_ix = 1
-        cursor_jumps = {}
-        cursor_jumps_press = {}
-        alpha.redraw = noop
-        vim.cmd([[au! alpha_temp]])
-        vim.cmd([[doautocmd User AlphaClosed]])
+    for _, k in ipairs(normalize_keymaps(conf.opts.keymap.queue_press)) do
+        vim.keymap.set("n", k, function() alpha.queue_press(state) end, { noremap = false, silent = true, buffer = state.buffer })
     end
-    draw()
-    vim.cmd([[doautocmd User AlphaReady]])
+
+    enable_alpha(conf, state)
+
+    alpha.draw(conf, state)
+
+    vim.api.nvim_exec_autocmds("User", { pattern = "AlphaReady" })
     keymaps(conf, state)
 end
 
 function alpha.setup(config)
-    vim.validate {
-      config = { config, "table" },
-      layout = {config.layout, "table"},
-    }
-    current_config = config
+    vim.validate({
+        config = { config, "table" },
+        layout = { config.layout, "table" },
+    })
 
-    --[[
-    vim.api.nvim_add_user_command('Alpha', function () alpha.start(false) end, {bang = true})
-    vim.api.nvim_add_user_command('AlphaRedraw', alpha.redraw, {bang = true})
-    ]]
-    vim.cmd([[
-        command! Alpha lua require'alpha'.start(false)
-        command! AlphaRedraw lua require('alpha').redraw()
-        augroup alpha_start
-        au!
-        autocmd VimEnter * nested lua require'alpha'.start(true)
-        augroup END
-    ]])
+    config.opts = vim.tbl_extend(
+        "keep",
+        if_nil(config.opts, {}),
+        {
+            autostart = true,
+            keymap = {
+                press = "<CR>",
+                queue_press = "<M-CR>",
+            }
+        }
+    )
+
+    alpha.default_config = config
+
+    vim.api.nvim_create_user_command("Alpha", function(_)
+        alpha.start(false, config)
+    end, {
+        bang = true,
+        desc = 'require"alpha".start(false)',
+        nargs = 0,
+        bar = true,
+    })
+
+    vim.api.nvim_create_user_command("AlphaRedraw", function(_)
+        alpha.redraw()
+    end, {
+        bang = true,
+        desc = 'require"alpha".redraw()',
+        nargs = 0,
+        bar = true,
+    })
+
+    local group_id = vim.api.nvim_create_augroup("alpha_start", { clear = true })
+    vim.api.nvim_create_autocmd("VimEnter", {
+        group = group_id,
+        pattern = "*",
+        nested = true,
+        callback = function()
+            if config.opts.autostart then
+                alpha.start(true, config)
+            end
+        end,
+    })
 end
 
 alpha.layout_element = layout_element
 alpha.keymaps_element = keymaps_element
+
+function alpha.handle_window(x)
+    local alpha_instance = alpha_state[x.buf]
+    local current_win = vim.api.nvim_get_current_win()
+    if alpha_instance then
+        local wins = vim.tbl_filter(function(win)
+            return (vim.api.nvim_win_get_buf(win) == x.buf) and (win ~= current_win)
+        end
+            , vim.api.nvim_list_wins()
+        )
+        alpha_instance.window = wins[1]
+    end
+end
 
 return alpha

@@ -13,7 +13,7 @@ CONTENTS                                                        *alpha-contents*
 ==============================================================================
 INTRO                                                              *alpha-intro*
 
-alpha is a plugin that shows a customizable greeter screen when neovim is
+alpha is a plugin that shows a programmable greeter screen when neovim is
 launched.
 
 ==============================================================================
@@ -29,7 +29,7 @@ CONFIGURATION                                              *alpha-configuration*
 
 the following is documentation for the types alpha uses for configuration
 
-config: 
+config:
 >
  config = {
     -- required
@@ -41,25 +41,35 @@ config:
     -- optional
     opts = {
         -- number: how much space to pad on the sides of the screen
-        margin = 0 
+        margin = 0
 
         -- theme-specific setup,
         -- ran once before the first draw
         setup = function
 
-        -- when true, 
+        -- when true,
         -- use 'noautocmd' when setting 'alpha' buffer local options.
         -- this can help performance, but it will prevent the
         -- FileType autocmd from firing, which may break integration
         -- with other plguins.
         -- default: false (disabled)
         noautocmd = bool
+
+        -- table of default keymaps
+        keymap = {
+            -- nil | string | string[]: key combinations used to press an
+            -- item.
+            press = '<CR>',
+            -- nil | string | string[]: key combination used to select an item to
+            -- press later.
+            press_queue = '<M-CR>'
+        }
     }
  }
 <
 button:
 >
- { 
+ {
     -- required
 
     -- element type
@@ -74,8 +84,14 @@ button:
 
     -- optional
     opts = {
+        -- define a buffer-local keymap for this element
+        -- accepts the arguments for 'nvim_set_keymap' as an array
+        -- normaly pairs with an 'on_press' function that feeds the lhs
+        -- keys (see alpha.dashboard.button implementation)
+        keymap = { {mode}, {lhs}, {rhs}, {*opts} }
+
         position = "left" | "center" | "right",
-        hl = "hl_group" | {{"hl_group", 0, -1}}
+        hl = "hl_group" | {{"hl_group", 0, -1}} | {{{"hl_group", 0, -1}}}
 
         shortcut = "string",
         align_shortcut = "left" | "right",
@@ -88,6 +104,14 @@ button:
         -- how wide to pad the button.
         -- useful if position = "center"
         width = 50,
+        -- when `shrink_margin` is true, the margin will
+        -- shrink when the window width is too small to display
+        -- the full width margin + the full element.
+        -- 'dashboard' has this set to true, since it has huge margins and
+        -- small layout elements, and 'startify' has this set to
+        -- false, since it has huge layout elements and a small margin
+        -- defaults to true
+        shrink_margin = true | false
     }
  }
 <
@@ -95,7 +119,7 @@ button:
 text:
 >
 
- { 
+ {
     -- required
 
     -- element type
@@ -108,7 +132,7 @@ text:
     -- optional
     opts = {
         position = "left" | "center" | "right",
-        hl = "hl_group" | {{"hl_group", 0, -1}}
+        hl = "hl_group" | {{"hl_group", 0, -1}} | {{{"hl_group", 0, -1}}}
     }
  }
 <
@@ -131,6 +155,34 @@ group:
     opts = {
         -- number of newlines inbetween each element
         spacing = 1
+        -- this table will extend the opts table of each entry of 'val'
+        -- keeping the entry from 'inherit'
+        -- unless the val.[n].opts.priority is >= opts.priority
+        inherit = {}
+        priority = 1 -- defaults to 1, see above
+    }
+ }
+<
+terminal:
+>
+ -- note: require'alpha.term' must be called
+ -- after require'alpha'
+ {
+    -- required
+    type = "terminal"
+    command = "string" | function -- the shell command to run
+    -- command size can be fixed, or calculated by mutating these
+    width = 0 -- number
+    height = 0 -- number
+
+    -- optional
+    opts = {
+        -- turns 'false' after the command is run
+        -- when redraw = true alpha will rerun the command
+        -- on the next redraw
+        redraw = true
+        -- see :h nvim_open_win {config} parameter
+        window_config = {}
     }
  }
 <
@@ -143,23 +195,63 @@ COLORS                                                            *alpha-colors*
 
 Highlighting is handled internally by the neovim api.
 
-You can highlight a button shortcut by supplying a highlight group to the 
-button option x.opt.hl_shortcut
+Most elements accept `opts.hl = "hl_group"` or an array of
+`{'hl_group', start_col, end_col}`
 
-You can highlight most elements by supplying an array of
-{'hl_group', start_col, end_col}
+for multiline elements, you supply a 2 dimensional array of
+`{'hl_group', start_col, end_col}`
 
-for multiline elements, you supply an array of an array of
-{'hl_group', start_col, end_col}
+You can highlight a button shortcut by supplying a highlight group to the
+option `x.opt.hl_shortcut`
+
+the builtin themes currently highlight with builtin highlight groups
+like `Number` and `Keyword`
 
 ==============================================================================
 AUTOCMDS                                                        *alpha-autocmds*
 
 alpha supports the following autocmds
 - `autocmd User AlphaReady`
+  meaning: alpha buffer has been loaded and has completed the first draw
+- `autocmd User AlphaClosed`
+  meaning: alpha buffer was unloaded
 
 there is an option to use *:noautocmd* when setting alpha's buffer local options
 see |alpha-configuration|
+
+==============================================================================
+THEME OPTIONS                                              *alpha-theme-options*
+
+theta/startify:
+>
+ mru_opts = {
+    -- return 'true' for paths which should not appear as entries in the MRU
+    -- menu. defaults to
+    ignore = function(path, ext)
+        return (string.find(path, "COMMIT_EDITMSG")) or (vim.tbl_contains(default_mru_ignore, ext))
+    end,
+    -- when 'true', selecting an item from the MRU menu will automatically
+    -- change your working directory to the parent directory of the entry.
+    -- defaults to
+    autocd = false
+ }
+
+ nvim_web_devicons = {
+     -- enable / disable icons in the MRU menu entries
+     -- defaults to
+     enabled = true,
+     -- enable / disable highlighting for the icons in the MRU menu entries
+     -- defaults to
+     highlight = true,
+ }
+<
+
+theta/dashboard:
+>
+ -- string: replaces `leader` "leader" in the button keymaps.
+ -- note: does not replace how it's displayed, so you'll want to
+ -- redfine the `dashboard.section.buttons.val` table
+ leader = "SPC"
 
 ==============================================================================
 EXAMPLE                                                          *alpha-example*
@@ -202,7 +294,7 @@ Example with the startify theme:
 >
     use {
         "goolord/alpha-nvim",
-        requires = { 'kyazdani42/nvim-web-devicons' },
+        requires = { 'nvim-tree/nvim-web-devicons' },
         config = function ()
             local alpha = require'alpha'
             local startify = require'alpha.themes.startify'
@@ -229,7 +321,7 @@ Example with the startify theme:
             startify.section.bottom_buttons.val = {
                 startify.button( "q", "  Quit NVIM" , ":qa<CR>"),
             }
-            startify.section.footer = {
+            startify.section.footer.val = {
                 { type = "text", val = "footer" },
             }
             -- ignore filetypes in MRU
@@ -259,7 +351,7 @@ How to disable the tabline in alpha buffer?~
     autocmd User AlphaReady set showtabline=0 | autocmd BufUnload <buffer> set showtabline=2
 
 How do I make a theme with no buttons?~
-    
+
     alpha needs to know where to place the cursor, falling back to {1,0}
     negatively impacted performance, so if you want to use a theme with no
     buttons, either create an empty button

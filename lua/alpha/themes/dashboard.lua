@@ -1,14 +1,25 @@
 local if_nil = vim.F.if_nil
 
+local default_terminal = {
+    type = "terminal",
+    command = nil,
+    width = 69,
+    height = 8,
+    opts = {
+        redraw = true,
+        window_config = {},
+    },
+}
+
 local default_header = {
     type = "text",
     val = {
-        [[                               __                ]],
-        [[  ___     ___    ___   __  __ /\_\    ___ ___    ]],
-        [[ / _ `\  / __`\ / __`\/\ \/\ \\/\ \  / __` __`\  ]],
-        [[/\ \/\ \/\  __//\ \_\ \ \ \_/ |\ \ \/\ \/\ \/\ \ ]],
-        [[\ \_\ \_\ \____\ \____/\ \___/  \ \_\ \_\ \_\ \_\]],
-        [[ \/_/\/_/\/____/\/___/  \/__/    \/_/\/_/\/_/\/_/]],
+        [[                                  __]],
+        [[     ___     ___    ___   __  __ /\_\    ___ ___]],
+        [[    / _ `\  / __`\ / __`\/\ \/\ \\/\ \  / __` __`\]],
+        [[   /\ \/\ \/\  __//\ \_\ \ \ \_/ |\ \ \/\ \/\ \/\ \]],
+        [[   \ \_\ \_\ \____\ \____/\ \___/  \ \_\ \_\ \_\ \_\]],
+        [[    \/_/\/_/\/____/\/___/  \/__/    \/_/\/_/\/_/\/_/]],
     },
     opts = {
         position = "center",
@@ -30,8 +41,8 @@ local leader = "SPC"
 
 --- @param sc string
 --- @param txt string
---- @param keybind string optional
---- @param keybind_opts table optional
+--- @param keybind string? optional
+--- @param keybind_opts table? optional
 local function button(sc, txt, keybind, keybind_opts)
     local sc_ = sc:gsub("%s", ""):gsub(leader, "<leader>")
 
@@ -49,8 +60,7 @@ local function button(sc, txt, keybind, keybind_opts)
     end
 
     local function on_press()
-        -- local key = vim.api.nvim_replace_termcodes(keybind .. "<Ignore>", true, false, true)
-        local key = vim.api.nvim_replace_termcodes(sc_ .. "<Ignore>", true, false, true)
+        local key = vim.api.nvim_replace_termcodes(keybind or sc_ .. "<Ignore>", true, false, true)
         vim.api.nvim_feedkeys(key, "t", false)
     end
 
@@ -79,6 +89,7 @@ local buttons = {
 }
 
 local section = {
+    terminal = default_terminal,
     header = default_header,
     buttons = buttons,
     footer = footer,
